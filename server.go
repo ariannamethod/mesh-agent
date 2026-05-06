@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// (imports clean — io, encoding/json, net, net/http, os, strings, time, fmt)
+
+
 // Server is the HTTP API.
 //
 // Endpoints (Phase 1):
@@ -26,10 +29,11 @@ type Server struct {
 	addr string
 	reg  *Registry
 	peer *PeerCache
+	jobs *JobManager
 }
 
-func newServer(addr string, reg *Registry, peer *PeerCache) *Server {
-	return &Server{addr: addr, reg: reg, peer: peer}
+func newServer(addr string, reg *Registry, peer *PeerCache, jobs *JobManager) *Server {
+	return &Server{addr: addr, reg: reg, peer: peer, jobs: jobs}
 }
 
 func (s *Server) run() error {
@@ -40,6 +44,8 @@ func (s *Server) run() error {
 	mux.HandleFunc("/peers", s.handlePeers)
 	mux.HandleFunc("/msg", s.handleMsg)
 	mux.HandleFunc("/presence", s.handlePresence)
+	mux.HandleFunc("/jobs", s.handleJobs)
+	mux.HandleFunc("/job/", s.handleJob)
 	srv := &http.Server{
 		Addr:              s.addr,
 		Handler:           logging(mux),
@@ -61,17 +67,135 @@ func (s *Server) handleSlots(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSlot(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/slot/")
-	if id == "" {
+	rest := strings.TrimPrefix(r.URL.Path, "/slot/")
+	if rest == "" {
 		http.Error(w, "missing slot id", 400)
 		return
 	}
-	slot, ok := s.reg.get(id)
+	// Two shapes:
+	//   /slot/<id>          GET manifest
+	//   /slot/<id>/invoke   POST job invocation
+	if strings.HasSuffix(rest, "/invoke") {
+		id := strings.TrimSuffix(rest, "/invoke")
+		s.handleInvoke(w, r, id)
+		return
+	}
+	slot, ok := s.reg.get(rest)
 	if !ok {
 		http.Error(w, "not found", 404)
 		return
 	}
 	writeJSON(w, 200, slot)
+}
+
+// handleInvoke spawns a new job for a slot.
+//
+// Request body (JSON): {"args": ["arg1", "arg2", ...]}
+// Response: {"job_id": "...", "state": "running"}
+func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request, slotID string) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", 405)
+		return
+	}
+	slot, ok := s.reg.get(slotID)
+	if !ok {
+		http.Error(w, "slot not found", 404)
+		return
+	}
+	var req struct {
+		Args []string `json:"args"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "expected JSON {args:[...]}", 400)
+			return
+		}
+	}
+	job, err := s.jobs.invoke(slot, req.Args)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, 202, map[string]any{
+		"job_id": job.ID,
+		"state":  job.State,
+	})
+}
+
+func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"jobs": s.jobs.list()})
+}
+
+// handleJob serves both:
+//   GET    /job/{id}         status JSON
+//   GET    /job/{id}/stream  SSE stream of stdout/stderr lines (live + backfill)
+//   DELETE /job/{id}         kill
+func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/job/")
+	if rest == "" {
+		http.Error(w, "missing job id", 400)
+		return
+	}
+	stream := false
+	id := rest
+	if strings.HasSuffix(rest, "/stream") {
+		stream = true
+		id = strings.TrimSuffix(rest, "/stream")
+	}
+	job, ok := s.jobs.get(id)
+	if !ok {
+		http.Error(w, "job not found", 404)
+		return
+	}
+	if r.Method == "DELETE" {
+		if err := s.jobs.kill(id); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"killed": id})
+		return
+	}
+	if !stream {
+		writeJSON(w, 200, job)
+		return
+	}
+	// SSE stream
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", 500)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	// Backfill ring buffer first
+	for _, line := range job.snapshot() {
+		writeSSE(w, "log", strings.TrimRight(line, "\n"))
+	}
+	flusher.Flush()
+	// Live channel
+	ch := job.subscribeChan()
+	ctxDone := r.Context().Done()
+	for {
+		select {
+		case <-ctxDone:
+			return
+		case line, more := <-ch:
+			if !more {
+				// job ended; send final state and close
+				writeSSE(w, "state", string(job.State))
+				flusher.Flush()
+				return
+			}
+			writeSSE(w, "log", strings.TrimRight(line, "\n"))
+			flusher.Flush()
+		}
+	}
+}
+
+func writeSSE(w http.ResponseWriter, event, data string) {
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
 }
 
 func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {

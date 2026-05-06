@@ -17,11 +17,11 @@ This is the **networking layer** of the arianna ecosystem. The compute layer (`n
 
 ## Status
 
-**Phase 1 (in flight):** HTTP server, manifest loader, message inbox, peers cache (skeleton).
-**Phase 2:** active discovery loop (poll peers, cache, persist).
-**Phase 3:** `/slot/{id}/invoke` async exec + `/job/{id}/stream` SSE.
-**Phase 4:** `mesh` CLI wrapper for human-friendly invocation.
-**Phase 5:** cross-compile + deploy (darwin-arm64 / linux-amd64 / linux-arm64 / android-arm64).
+**Phase 1 ✓:** HTTP server, manifest loader, message inbox.
+**Phase 2 ✓:** peer discovery loop (read `~/.mesh/peers.txt`, GET `/slots` every 60s, persist `peers.json`).
+**Phase 3 ✓:** `/slot/{id}/invoke` async exec via `sh -c`, job manager with ring-buffer stdout/stderr capture, `/job/{id}/stream` SSE (backfill + live), `DELETE /job/{id}` kill via SIGTERM.
+**Phase 4 (next):** `mesh` CLI wrapper.
+**Phase 5:** cross-compile + deploy.
 **Phase 6:** mhx pipeline-stage → slot auto-registration.
 
 ---
@@ -97,16 +97,45 @@ This copies the file into `~/.mesh/slots/<id>.toml`. Restart the daemon to reloa
 
 ---
 
-## API (Phase 1)
+## API
 
-| method | path             | description                             |
-|--------|------------------|-----------------------------------------|
-| GET    | `/`              | health + version + slot count           |
-| GET    | `/slots`         | list local slots                        |
-| GET    | `/slot/{id}`     | manifest for one slot                   |
-| GET    | `/peers`         | cached peer registry                    |
-| POST   | `/msg`           | deposit `{from,to,body}` JSON in inbox  |
-| GET    | `/presence`      | host name, version, slot count          |
+| method | path                    | description                                            |
+|--------|-------------------------|--------------------------------------------------------|
+| GET    | `/`                     | health + version + slot count                          |
+| GET    | `/slots`                | list local slots                                       |
+| GET    | `/slot/{id}`            | manifest for one slot                                  |
+| POST   | `/slot/{id}/invoke`     | spawn async job — body `{"args":["..."]}`              |
+| GET    | `/jobs`                 | list all jobs (latest first)                           |
+| GET    | `/job/{id}`             | job status JSON                                        |
+| GET    | `/job/{id}/stream`      | SSE: backfill ring buffer, then live `log` events, finish with `state` event |
+| DELETE | `/job/{id}`             | SIGTERM the running process                            |
+| GET    | `/peers`                | cached peer registry                                   |
+| POST   | `/msg`                  | deposit `{from,to,body}` JSON in inbox                 |
+| GET    | `/presence`             | host name, version, slot count                         |
+
+## Peer discovery
+
+Create `~/.mesh/peers.txt` with one `host:port` per line:
+
+```
+neo:4747
+intel:4747
+polygon:4747
+arianna-method:4747
+galaxy-a07:4747
+```
+
+Lines starting with `#` are comments. The agent polls each peer's `/slots` every 60s and persists the result in `~/.mesh/peers.json`.
+
+## Invoke example
+
+```bash
+# spawn
+curl -s -X POST http://neo:4747/slot/echo/hello/invoke -d '{}' \
+  | jq -r .job_id
+# stream stdout
+curl -N http://neo:4747/job/<id>/stream
+```
 
 ---
 

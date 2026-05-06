@@ -115,7 +115,8 @@ func cmdServe(args []string) {
 	pr := newPeerCache(peersFile())
 	pr.startDiscovery(reg)
 
-	srv := newServer(addr, reg, pr)
+	jm := newJobManager()
+	srv := newServer(addr, reg, pr, jm)
 	log.Printf("mesh-agent %s serving on http://%s", Version, addr)
 	log.Printf("  slots: %d local", reg.count())
 	if err := srv.run(); err != nil {

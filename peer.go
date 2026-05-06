@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -86,13 +88,76 @@ func (p *PeerCache) list() []*Peer {
 	return out
 }
 
-// startDiscovery is a stub for Phase 2. It loads existing peers.json so
-// `mesh-agent peers` returns whatever was last seen, but does not actively
-// poll yet — that comes when we have a known peer list (CLI flag or hostsfile).
+// startDiscovery loads the existing cache and starts a background goroutine
+// that polls peers listed in ~/.mesh/peers.txt every PollInterval.
+//
+// peers.txt format: one "host:port" per line. Lines starting with '#' are
+// comments. Empty lines ignored.
 func (p *PeerCache) startDiscovery(reg *Registry) {
 	_ = p.load()
-	// TODO Phase 2: read ~/.mesh/peers.txt (one host:port per line),
-	// poll each /slots every 60s, populate cache, persist on change.
+	go p.pollLoop()
+}
+
+// PollInterval is how often discovery hits each peer.
+var PollInterval = 60 * time.Second
+
+func (p *PeerCache) pollLoop() {
+	tick := time.NewTicker(PollInterval)
+	defer tick.Stop()
+	// also fire once at startup so peers.json gets fresh data quickly
+	p.pollOnce()
+	for {
+		select {
+		case <-p.stop:
+			return
+		case <-tick.C:
+			p.pollOnce()
+		}
+	}
+}
+
+func (p *PeerCache) pollOnce() {
+	hosts, err := readPeersFile(filepath.Join(filepath.Dir(p.path), "peers.txt"))
+	if err != nil || len(hosts) == 0 {
+		return
+	}
+	changed := false
+	for _, hp := range hosts {
+		base := "http://" + hp
+		slots, err := fetchSlots(base)
+		if err != nil {
+			// keep last-known data; don't drop on a single timeout
+			continue
+		}
+		name := strings.SplitN(hp, ":", 2)[0]
+		peer := &Peer{
+			Name:  name,
+			Addr:  hp,
+			Slots: slots,
+		}
+		p.upsert(peer)
+		changed = true
+	}
+	if changed {
+		_ = p.save()
+	}
+}
+
+// readPeersFile parses ~/.mesh/peers.txt, returning host:port entries.
+func readPeersFile(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out, nil
 }
 
 // fetchSlots GET /slots from a remote agent and returns the parsed slots.

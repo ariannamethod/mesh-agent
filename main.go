@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const Version = "0.1.0"
@@ -42,6 +43,12 @@ func main() {
 		cmdPeers(args)
 	case "register":
 		cmdRegister(args)
+	case "exec":
+		cmdExec(args)
+	case "send":
+		cmdSend(args)
+	case "status":
+		cmdStatus(args)
 	case "version", "-v", "--version":
 		fmt.Println("mesh-agent", Version)
 	case "help", "-h", "--help":
@@ -58,11 +65,19 @@ func usage() {
 
 usage: mesh-agent <command> [flags]
 
-commands:
+server:
   serve              start HTTP daemon
   slots              list local slot manifests
   peers              list discovered peers + their slots
   register PATH      install a slot manifest into ~/.mesh/slots/
+
+client:
+  status [PEER]      show /presence of local agent (or PEER)
+  exec PEER SLOT [ARGS...]
+                     POST /slot/SLOT/invoke on PEER, stream SSE log
+  send PEER TEXT     POST /msg on PEER ({from: us, to: PEER, body: TEXT})
+
+other:
   version            print version
   help               show this message
 
@@ -70,7 +85,27 @@ defaults:
   state dir          ~/.mesh
   slots dir          ~/.mesh/slots
   bind addr          first tailnet IPv4 (100.x.x.x), port 4747
+  client target      reads ~/.mesh/agent (host:port) or default neo:4747
+                     PEER may be host or host:port (port defaults to 4747)
 `, Version)
+}
+
+// resolvePeer returns "host:port" string. If user passed "host" only, append :4747.
+func resolvePeer(p string) string {
+	if p == "" {
+		// fallback: try ~/.mesh/agent file, else "127.0.0.1:4747"
+		if data, err := os.ReadFile(filepath.Join(meshDir(), "agent")); err == nil {
+			s := strings.TrimSpace(string(data))
+			if s != "" {
+				return s
+			}
+		}
+		return "127.0.0.1:4747"
+	}
+	if strings.Contains(p, ":") {
+		return p
+	}
+	return p + ":4747"
 }
 
 func meshDir() string {

@@ -317,3 +317,11 @@ func (s *statusWriter) WriteHeader(code int) {
 	s.code = code
 	s.ResponseWriter.WriteHeader(code)
 }
+
+// Flush exposes the underlying ResponseWriter's Flush so that SSE handlers
+// can satisfy http.Flusher even when wrapped by our access-log middleware.
+func (s *statusWriter) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}

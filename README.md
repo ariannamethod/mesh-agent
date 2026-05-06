@@ -160,3 +160,60 @@ The HTTP server is plain `net/http` — no framework, no middleware kitchen sink
 ## License
 
 MIT (see `LICENSE`).
+
+---
+
+## Deployment notes
+
+When deploying across the mesh, two operational issues commonly appear:
+
+**1. macOS Application Firewall** blocks unsigned binaries from accepting incoming connections, even if the port is bound. Symptoms: nc connects but curl returns "Empty reply from server". Fix:
+
+```bash
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add ~/.local/bin/mesh-agent
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp ~/.local/bin/mesh-agent
+```
+
+Or codesign+notarize for production. Or `--bind 0.0.0.0` doesn't bypass — firewall still blocks. Workaround: disable firewall (`socketfilterfw --setglobalstate off`) on trusted Tailscale-only nodes.
+
+**2. Linux: process dies on ssh disconnect.** `nohup ... &` + `disown` is unreliable across some shell + sshd combinations. Use `setsid -f` for full detachment, or — better — a user systemd service:
+
+```ini
+# ~/.config/systemd/user/mesh-agent.service
+[Unit]
+Description=arianna mesh-agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mesh-agent serve
+Restart=on-failure
+StandardOutput=append:%h/.mesh/agent.log
+StandardError=append:%h/.mesh/agent.log
+
+[Install]
+WantedBy=default.target
+```
+
+Then `systemctl --user enable --now mesh-agent`.
+
+**3. macOS launchd alternative** (Neo/Intel):
+
+```xml
+<!-- ~/Library/LaunchAgents/method.arianna.mesh-agent.plist -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>method.arianna.mesh-agent</string>
+  <key>ProgramArguments</key><array>
+    <string>/opt/homebrew/bin/mesh-agent</string>
+    <string>serve</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/mesh-agent.log</string>
+  <key>StandardErrorPath</key><string>/tmp/mesh-agent.log</string>
+</dict></plist>
+```
+
+Then `launchctl load ~/Library/LaunchAgents/method.arianna.mesh-agent.plist`.
+
+**4. Termux on Android**: `nohup` works, but the Termux process must stay alive (acquire wakelock with `termux-wake-lock`).

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -277,13 +278,22 @@ func hostname() string {
 // resolveBind picks an address to listen on.
 // If bind is "" we try to pick the first tailnet IPv4 (100.x.x.x).
 // If none found, we fall back to 0.0.0.0 (only safe inside a Tailscale-only ACL).
+//
+// Android note: Termux runs under an Android UID without netlink RIB
+// permission, so net.InterfaceAddrs returns
+// `route ip+net: netlinkrib: permission denied` on every phone in the mesh.
+// Treat that the same as "no tailnet IP found" and fall through to the
+// 0.0.0.0 catch-all rather than refusing to start. Tailscale binds all
+// interfaces, so mesh reach via the tailnet still works; only
+// writeAgentTarget records loopback for local client lookup.
 func resolveBind(bind string, port int) (string, error) {
 	if bind != "" {
 		return fmt.Sprintf("%s:%d", bind, port), nil
 	}
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
-		return "", err
+		log.Printf("resolveBind: net.InterfaceAddrs failed (%v); falling back to 0.0.0.0:%d", err, port)
+		return fmt.Sprintf("0.0.0.0:%d", port), nil
 	}
 	for _, a := range addrs {
 		if ip, ok := a.(*net.IPNet); ok && ip.IP.To4() != nil {
